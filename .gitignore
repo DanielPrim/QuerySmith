@@ -1,3 +1,6 @@
 
 *.xml
 /.idea
+setup.py
+setup.py
+setup.cfg
