@@ -26,10 +26,10 @@ class AsyncPGBaseClass(ABC):
         """Метод, который должен возвращать список имён атрибутов, заданных в дочернем классе."""
         pass
 
-    @abstractmethod
     async def set_results(self, results):
         """Метод, для сохранения данных в классе таблицы."""
-        pass
+        for attr, data in results.items():
+            setattr(self, attr, data)
 
     def get_list_attributes(self) -> List['ColumnModel']:
         """Возвращает список атрибутов дочернего класса"""
@@ -75,7 +75,7 @@ class AsyncPGBaseClass(ABC):
         :param schema: SQL-схема для создания таблицы.
         """
 
-        migrations_dir = "./migrations"
+        migrations_dir = "./migrations_postgre"
         os.makedirs(migrations_dir, exist_ok=True)
 
         migration_filename = f"{migrations_dir}/create_{self.table}_{datetime.now().timestamp()}.sql"
@@ -190,10 +190,10 @@ class AsyncPGBaseClass(ABC):
 
                 rows_name.append(row.row_name)
                 rows_index.append(f'${index}')
-                index += f'${index}'
+                index += 1
 
             if id_row:
-                id_index = f'${id_index}'
+                id_index = f'${index}'
 
             if id_row is None:
                 query = (

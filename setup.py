@@ -14,7 +14,7 @@ setup(
   description='This is the module for fast and convenient work with sql databases.',
   long_description=readme(),
   long_description_content_type='text/markdown',
-  url='your_url',
+  url='https://github.com/DanielPrim/QuerySmith',
   packages=find_packages(),
   install_requires=['asyncpg~=0.30.0'],
   classifiers=[
@@ -24,7 +24,7 @@ setup(
   ],
   keywords='orm sql pgsql postgresql',
   project_urls={
-    'GitHub': 'your_github'
+    'GitHub': 'https://github.com/DanielPrim/QuerySmith'
   },
   python_requires='>=3.9'
 )
