@@ -1,287 +1,356 @@
+"""
+PostgreSQL базовый класс для QuerySmith
+
+Этот модуль содержит специфичную для PostgreSQL реализацию,
+наследующую от общего базового класса.
+"""
+
 import json
 from datetime import datetime
-from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional, Dict, Any, Union
 
 import asyncpg
 import asyncio
-import os
 
 from asyncpg import Record
 
-from QuerySmith.postgre.column_model import ColumnModel
-from QuerySmith.postgre.data_types import DataTypeDB
+from QuerySmith.base_model import BaseModel, ColumnModel
+from QuerySmith.data_types import DataType, DataTypeFactory
+from QuerySmith.query_cache import cache_query
 
 
-class AsyncPGBaseClass(ABC):
-    def __init__(self, db_config, table, max_retries=5, retry_delay=2):
-        self.db_config = db_config
+class AsyncPGBaseClass(BaseModel):
+    """
+    PostgreSQL базовый класс
+    
+    Наследует от общего BaseModel и реализует специфичную
+    для PostgreSQL логику работы с базой данных.
+    """
+    
+    def __init__(self, db_config: Dict[str, Any], table: str, 
+                 max_retries: int = 5, retry_delay: int = 2):
+        """
+        Инициализация PostgreSQL модели
+        
+        :param db_config: Конфигурация PostgreSQL
+        :param table: Название таблицы
+        :param max_retries: Максимальное количество попыток подключения
+        :param retry_delay: Задержка между попытками подключения
+        """
+        super().__init__(table, db_config)
         self.conn = None
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.table = table
-
-    @abstractmethod
-    def get_attributes(self):
-        """Метод, который должен возвращать список имён атрибутов, заданных в дочернем классе."""
+        self._setup_columns()
+    
+    def _setup_columns(self) -> None:
+        """
+        Настройка столбцов модели.
+        Должен быть переопределен в дочерних классах.
+        """
+        # Этот метод будет переопределен в дочерних классах
         pass
-
-    async def set_results(self, results):
-        """Метод, для сохранения данных в классе таблицы."""
-        for attr, data in results.items():
-            setattr(self, attr, data)
-
-    def get_list_attributes(self) -> List['ColumnModel']:
-        """Возвращает список атрибутов дочернего класса"""
-        return [getattr(self, attr) for attr in self.get_attributes()]
-
-    def get_schema_on_create(self) -> str:
-        """Создает sql-схему для создания таблицы"""
-        table_rows = self.get_list_attributes()
-        references = ''
-        schema = f'CREATE TABLE {self.table} (\n'
-        for row in table_rows:
-
-            if row.primary_key:
-                primary_key = ' PRIMARY KEY'
-            else:
-                primary_key = ''
-
-            if row.unique:
-                unique = ' UNIQUE'
-            else:
-                unique = ''
-
-            if row.references_table:
-                reference_table_rows = row.references_table.get_list_attributes()
-                reference = None
-                for ref_row in reference_table_rows:
-                    if ref_row.primary_key:
-                        reference = f'FOREIGN KEY ({row.row_name}) REFERENCES {row.references_table.table}({ref_row.row_name})\n'
-                        references += reference
-                        break
-                if not reference:
-                    raise 'The reference table does not have a primary key!'
-
-            schema += f'{row.row_name} {row.data_type}{primary_key}{unique}\n'
-
-        schema += references
-        schema += ')'
-
-    def create_migration_file(self, schema: str):
+    
+    def get_attributes(self) -> List[str]:
         """
-        Создаёт файл миграции для таблицы.
-
-        :param schema: SQL-схема для создания таблицы.
+        Возвращает список имен атрибутов модели.
+        Должен быть переопределен в дочерних классах.
         """
-
-        migrations_dir = "./migrations_postgre"
-        os.makedirs(migrations_dir, exist_ok=True)
-
-        migration_filename = f"{migrations_dir}/create_{self.table}_{datetime.now().timestamp()}.sql"
-        if not os.path.exists(migration_filename):
-            with open(migration_filename, "w", encoding="utf-8") as migration_file:
-                migration_file.write(f"-- Миграция для создания таблицы {self.table}\n")
-                migration_file.write(schema)
-            print(f"Файл миграции '{migration_filename}' успешно создан.")
-        else:
-            print(f"Файл миграции '{migration_filename}' уже существует.")
-
-    async def connect(self) -> None:
-        """Подключается к базе данных с повторными попытками в случае неудачи."""
-        attempt = 0
-        while attempt < self.max_retries:
-            try:
-                self.conn = await asyncpg.connect(**self.db_config)
-                print("Соединение установлено.")
-                break
-            except (asyncpg.exceptions.ConnectionDoesNotExistError, OSError):
-                attempt += 1
-                print(f"Попытка {attempt}/{self.max_retries} не удалась. Повтор через {self.retry_delay} секунд.")
-                await asyncio.sleep(self.retry_delay)
-        else:
-            raise ConnectionError("Не удалось установить соединение с базой данных после нескольких попыток.")
-
-    async def reconnect_if_needed(self) -> None:
-        """Проверяет соединение и переподключается, если соединение было потеряно."""
+        # Этот метод будет переопределен в дочерних классах
+        return []
+    
+    async def _connect(self):
+        """Подключение к PostgreSQL"""
         if self.conn is None or self.conn.is_closed():
-            print("Соединение потеряно. Переподключение...")
-            await self.connect()
-
-    async def execute(self, query, *params, fetch_one=False, fetch_all=False) -> None | Record | List['Record']:
-        """Выполняет SQL-запрос с поддержкой возврата данных и автоматическим переподключением."""
-        attempt = 0
-        while attempt < self.max_retries:
-            try:
-                await self.reconnect_if_needed()
-                if fetch_one:
-                    return await self.conn.fetchrow(query, *params)
-                elif fetch_all:
-                    return await self.conn.fetch(query, *params)
-                else:
-                    await self.conn.execute(query, *params)
-                break
-            except (asyncpg.exceptions.ConnectionDoesNotExistError, asyncpg.exceptions.InterfaceError, OSError) as e:
-                print(f"Ошибка выполнения запроса: {e}. Попытка повторного подключения.")
-                attempt += 1
-                await self.connect()
-                await asyncio.sleep(self.retry_delay)
-        else:
-            raise ConnectionError("The request failed after several attempts.")
-
-    async def close(self) -> None:
-        """Закрывает соединение с базой данных."""
-        if self.conn is not None and not self.conn.is_closed():
-            await self.conn.close()
-            print("Соединение закрыто.")
-
-    async def ensure_table_exists(self) -> None:
-        """
-        Проверяет, существует ли таблица, и создаёт её, если не существует.
-        """
-        await self.connect()
+            for attempt in range(self.max_retries):
+                try:
+                    self.conn = await asyncpg.connect(**self.db_config)
+                    break
+                except Exception as e:
+                    if attempt == self.max_retries - 1:
+                        raise e
+                    await asyncio.sleep(self.retry_delay)
+    
+    async def _execute(self, query: str, params: tuple = None, 
+                      fetch_one: bool = False, fetch_all: bool = False):
+        """Выполнение запроса к PostgreSQL"""
+        await self._connect()
+        
         try:
-            query = f"""
+            if params:
+                result = await self.conn.execute(query, *params)
+            else:
+                result = await self.conn.execute(query)
+            
+            if fetch_one:
+                return await self.conn.fetchrow(query, *params) if params else await self.conn.fetchrow(query)
+            elif fetch_all:
+                return await self.conn.fetch(query, *params) if params else await self.conn.fetch(query)
+            else:
+                return result
+        except Exception as e:
+            await self._close()
+            raise e
+    
+    async def _close(self):
+        """Закрытие соединения с PostgreSQL"""
+        if self.conn and not self.conn.is_closed():
+            await self.conn.close()
+    
+    async def ensure_table_exists(self) -> None:
+        """Проверяет существование таблицы и создает её при необходимости"""
+        try:
+            # Проверяем существование таблицы
+            query = """
             SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
+                SELECT FROM information_schema.tables 
                 WHERE table_name = $1
             )
             """
-            table_exists = await self.conn.fetchval(query, self.table)
-
-            if not table_exists:
-
+            result = await self._execute(query, (self.table,), fetch_one=True)
+            
+            if not result[0]:
+                # Создаем таблицу
                 schema = self.get_schema_on_create()
-
-                await self.conn.execute(schema)
-                print(f"Таблица '{self.table}' была успешно создана.")
+                await self._execute(schema)
                 self.create_migration_file(schema)
+                print(f"Таблица {self.table} успешно создана.")
             else:
-                print(f"Таблица '{self.table}' уже существует.")
-        finally:
-            await self.close()
-
-    async def save(self):
-        """Сохраняет текущий экземпляр в базе данных."""
-        try:
-            await self.connect()
-
+                # Проверяем и обновляем схему
+                await self._update_table_schema_if_needed()
+                
+        except Exception as e:
+            print(f"Ошибка при проверке таблицы {self.table}: {e}")
+            raise
+    
+    async def _update_table_schema_if_needed(self) -> None:
+        """Обновляет схему таблицы при необходимости"""
+        current_schema = await self._get_current_table_schema()
+        expected_columns = self.get_list_attributes()
+        
+        for column in expected_columns:
+            if column.row_name not in current_schema:
+                # Добавляем новую колонку
+                alter_query = f"ALTER TABLE {self.table} ADD COLUMN {column.row_name} {column.data_type}"
+                await self._execute(alter_query)
+                print(f"Добавлена колонка {column.row_name} в таблицу {self.table}")
+    
+    async def _get_current_table_schema(self) -> Dict[str, Dict]:
+        """Получает текущую схему таблицы"""
+        query = """
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_name = $1
+        """
+        rows = await self._execute(query, (self.table,), fetch_all=True)
+        
+        schema = {}
+        for row in rows:
+            schema[row['column_name']] = {
+                'data_type': row['data_type'],
+                'is_nullable': row['is_nullable'] == 'YES',
+                'default': row['column_default']
+            }
+        return schema
+    
+    async def _insert_data(self, rows_name: List[str], rows_data: List[Any]) -> Any:
+        """Вставляет данные в PostgreSQL"""
+        placeholders = ', '.join(f'${i+1}' for i in range(len(rows_data)))
+        query = f'INSERT INTO {self.table} ({", ".join(rows_name)}) VALUES ({placeholders}) RETURNING id'
+        
+        result = await self._execute(query, tuple(rows_data), fetch_one=True)
+        return result['id'] if result else None
+    
+    async def _update_data(self, rows_name: List[str], rows_data: List[Any], 
+                          id_row: str, id_data: Any) -> Any:
+        """Обновляет данные в PostgreSQL"""
+        set_clause = ', '.join(f"{col} = ${i+1}" for i, col in enumerate(rows_name))
+        query = f"UPDATE {self.table} SET {set_clause} WHERE {id_row} = ${len(rows_data)+1}"
+        
+        params = tuple(rows_data) + (id_data,)
+        result = await self._execute(query, params)
+        return id_data
+    
+    async def load_one(self, id: Any) -> None:
+        """Загружает данные из PostgreSQL по ID"""
+        query = f'SELECT * FROM {self.table} WHERE id = $1'
+        result = await self._execute(query, (id,), fetch_one=True)
+        
+        if result:
+            data = {}
             table_columns = self.get_list_attributes()
-
-            id_row = None
-            id_index = None
-
-            index = 1
-
-            rows_name = []
-            rows_data = []
-            rows_index = []
-
-            for row in table_columns:
-                if row.primary_key:
-                    id_row = row.row_name
-                    continue
-
-                if row.data_type == DataTypeDB.json or row.data_type == DataTypeDB.jsonb:
-                    rows_data.append(json.dumps(row.data))
-                else:
-                    rows_data.append(row.data)
-
-                rows_name.append(row.row_name)
-                rows_index.append(f'${index}')
-                index += 1
-
-            if id_row:
-                id_index = f'${index}'
-
-            if id_row is None:
-                query = (
-                    f"INSERT INTO {self.table} ({', '.join(rows_name)}) VALUES "
-                    f"({', '.join(rows_index)}) RETURNING {id_row}")
-                result = await self.execute(
-                    query,
-                    rows_data,
-                    fetch_one=True
-                )
-                if result:
-                    return result['id_row']
-                else:
-                    raise 'Failed to make record'
-            else:
-                await self.execute(
-                    f"UPDATE {self.table} SET ({', '.join(rows_name)}) VALUES ({', '.join(rows_index)}) WHERE {id_row} = {id_index}",
-                    rows_data
-                )
-        finally:
-            await self.close()
-
-    async def load_one(self, id) -> None:
-        """Загружает данные из базы данных в текущий экземпляр."""
-        try:
-            await self.connect()
-
+            
+            for idx, column in enumerate(table_columns):
+                value = result[idx]
+                # Обработка специальных типов данных
+                if column.data_type in ('JSON', 'JSONB') and value is not None:
+                    try:
+                        if isinstance(value, str):
+                            value = json.loads(value)
+                    except json.JSONDecodeError:
+                        pass
+                
+                data[column.row_name] = value
+            
+            await self.set_results(data)
+        else:
+            return None
+    
+    async def load_one_custom(self, **kwargs) -> None:
+        """Загружает данные из PostgreSQL по произвольным условиям"""
+        if not kwargs:
+            raise ValueError("Необходимо указать хотя бы одно условие")
+        
+        conditions = []
+        params = []
+        param_index = 1
+        
+        for key, value in kwargs.items():
+            conditions.append(f"{key} = ${param_index}")
+            params.append(value)
+            param_index += 1
+        
+        where_clause = ' AND '.join(conditions)
+        query = f'SELECT * FROM {self.table} WHERE {where_clause}'
+        
+        result = await self._execute(query, tuple(params), fetch_one=True)
+        
+        if result:
+            data = {}
             table_columns = self.get_list_attributes()
-
-            query = f"SELECT * FROM {self.table} WHERE id = $1"
-            result = await self.execute(query, id, fetch_one=True)
-            if result:
-                data = {}
-                for column in table_columns:
-                    if column.data_type == DataTypeDB.json or column.data_type == DataTypeDB.jsonb:
-                        data[column.row_name] = json.loads(result[column.row_name])
-                    else:
-                        data[column.row_name] = result[column.row_name]
-                await self.set_results(results=data)
-            else:
-                raise 'The record was not found'
-        finally:
-            await self.close()
-
+            
+            for idx, column in enumerate(table_columns):
+                value = result[idx]
+                # Обработка специальных типов данных
+                if column.data_type in ('JSON', 'JSONB') and value is not None:
+                    try:
+                        if isinstance(value, str):
+                            value = json.loads(value)
+                    except json.JSONDecodeError:
+                        pass
+                
+                data[column.row_name] = value
+            
+            await self.set_results(data)
+        else:
+            return None
+    
     async def delete(self) -> None:
-        """Удаляет текущий экземпляр из базы данных."""
-        try:
-            await self.connect()
-
-            table_columns = self.get_list_attributes()
-
-            id_row = next((row.row_name for row in table_columns if row.primary_key), None)
-            data_row = next((row.data for row in table_columns if row.primary_key), None)
-
-            if id_row is not None:
-                await self.execute(f"DELETE FROM {self.table} WHERE {id_row} = $1", data_row)
-        finally:
-            await self.close()
-
+        """Удаляет текущий экземпляр из PostgreSQL"""
+        table_columns = self.get_list_attributes()
+        id_row = next((row.row_name for row in table_columns if row.primary_key), None)
+        id_data = next((row.data for row in table_columns if row.primary_key), None)
+        
+        if id_row and id_data is not None:
+            query = f'DELETE FROM {self.table} WHERE {id_row} = $1'
+            await self._execute(query, (id_data,))
+    
+    async def transaction(self):
+        await self._connect()
+        return self.conn.transaction()
+    
     @classmethod
-    async def get_all(cls, db_config, table) -> List['AsyncPGBaseClass']:
-        """
-        Возвращает все записи из базы данных как список объектов.
-        """
+    async def get_all(cls, db_config: Dict[str, Any], table: str) -> List['AsyncPGBaseClass']:
+        """Возвращает все записи из PostgreSQL"""
         instance = cls(db_config, table)
-        try:
-            await instance.connect()
-
-            table_columns = instance.get_list_attributes()
-
-            query = "SELECT * FROM users"
-            results = await instance.execute(query, fetch_all=True)
-
-            instances = []
-            if results:
-                for result in results:
-                    instance = cls(db_config, table)
-                    data = {}
-                    for column in table_columns:
-                        if column.data_type == DataTypeDB.json or column.data_type == DataTypeDB.jsonb:
-                            data[column.row_name] = json.loads(result[column.row_name])
-                        else:
-                            data[column.row_name] = result[column.row_name]
-                    await instance.set_results(data)
-                    instances.append(instance)
-
-                return instances
-            else:
-                return None
-        finally:
-            await instance.close()
+        query = f'SELECT * FROM {table}'
+        
+        results = await instance._execute(query, fetch_all=True)
+        instances = []
+        
+        if results:
+            for result in results:
+                instance = cls(db_config, table)
+                data = {}
+                table_columns = instance.get_list_attributes()
+                
+                for idx, column in enumerate(table_columns):
+                    value = result[idx]
+                    # Обработка специальных типов данных
+                    if column.data_type in ('JSON', 'JSONB') and value is not None:
+                        try:
+                            if isinstance(value, str):
+                                value = json.loads(value)
+                        except json.JSONDecodeError:
+                            pass
+                    
+                    data[column.row_name] = value
+                
+                await instance.set_results(data)
+                instances.append(instance)
+        
+        await instance._close()
+        return instances
+    
+    @classmethod
+    async def get_all_by(cls, db_config: Dict[str, Any], table: str, 
+                        **kwargs) -> List['AsyncPGBaseClass']:
+        """Возвращает записи из PostgreSQL по условиям"""
+        if not kwargs:
+            return await cls.get_all(db_config, table)
+        
+        instance = cls(db_config, table)
+        conditions = []
+        params = []
+        param_index = 1
+        
+        for key, value in kwargs.items():
+            conditions.append(f"{key} = ${param_index}")
+            params.append(value)
+            param_index += 1
+        
+        where_clause = ' AND '.join(conditions)
+        query = f'SELECT * FROM {table} WHERE {where_clause}'
+        
+        results = await instance._execute(query, tuple(params), fetch_all=True)
+        instances = []
+        
+        if results:
+            for result in results:
+                instance = cls(db_config, table)
+                data = {}
+                table_columns = instance.get_list_attributes()
+                
+                for idx, column in enumerate(table_columns):
+                    value = result[idx]
+                    # Обработка специальных типов данных
+                    if column.data_type in ('JSON', 'JSONB') and value is not None:
+                        try:
+                            if isinstance(value, str):
+                                value = json.loads(value)
+                        except json.JSONDecodeError:
+                            pass
+                    
+                    data[column.row_name] = value
+                
+                await instance.set_results(data)
+                instances.append(instance)
+        
+        await instance._close()
+        return instances
+    
+    @classmethod
+    @cache_query()
+    async def execute_query(cls, db_config: Dict[str, Any], table: str, query: str) -> List['AsyncPGBaseClass']:
+        instance = cls(db_config, table)
+        results = await instance._execute(query, fetch_all=True)
+        instances = []
+        if results:
+            for result in results:
+                instance = cls(db_config, table)
+                data = {}
+                table_columns = instance.get_list_attributes()
+                for idx, column in enumerate(table_columns):
+                    if idx < len(result):
+                        value = result[idx]
+                        if column.data_type in ('JSON', 'JSONB') and value is not None:
+                            try:
+                                if isinstance(value, str):
+                                    value = json.loads(value)
+                            except json.JSONDecodeError:
+                                pass
+                        data[column.row_name] = value
+                await instance.set_results(data)
+                instances.append(instance)
+        await instance._close()
+        return instances
